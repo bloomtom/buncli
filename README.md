@@ -28,12 +28,12 @@ dotnet BunCLI\bin\Release\netcoreapp2.1\bun.dll --help
 The following is an output of the `--help` option.
 ```
 >dotnet bun.dll --help
-bun 0.1.0
+bun 0.1.1
 MIT License - Copyright 2018 bloomtom
 
   l          List files stored in a storage zone.
 
-  u          Upload a file. The file is read from the standard input.
+  u          Upload a file from disk or stdin.
 
   g          Get/download a file. The downloaded file is written to the standard output.
 
@@ -46,13 +46,15 @@ MIT License - Copyright 2018 bloomtom
 You can get more information about a command by asking for `--help` on a specific verb:
 ```
 >dotnet bun.dll u --help
-bun 0.1.0
+bun 0.1.1
 MIT License - Copyright 2018 bloomtom
 USAGE:
-Upload a file from the standard input stream:
->  dotnet bun.dll u --key 01234567-89ab --name somefile.txt --zone MyZone
+Upload a file from disk:
+>  dotnet bun.dll u --key 01234567-89ab --path somefile.txt --zone MyZone
 
-  -n, --name    The file name. Defaults to the filename on disk.
+  -n, --name    The file name to upload as. Defaults to the filename on disk.
+
+  -p, --path    The file path on disk.
 
   -z, --zone    The storage zone.
 
@@ -62,18 +64,23 @@ Upload a file from the standard input stream:
 
   --version     Display version information.
 ```
-When running the upload or download command, data is taken and written to the standard input and output respectively. To upload a file you can use the `<` operator. The following will upload somefile.txt and name it MyFile.txt in your BunnyCDN storage.
+So to upload a file you can simply run `dotnet bun.dll u -p myfile.txt`.
+
+
+When running the upload or download command, data can also be taken and written to the standard input and output respectively. To upload a file you can use the `<` operator. The following will upload somefile.txt and name it MyFile.txt in your BunnyCDN storage.
 ```
 dotnet bun.dll u -n MyFile.txt < somefile.txt
 ```
-You can also use pipes. Forgive the UUOC for this example.
+You can also use pipes. The following is equivalent to the above. 
 ```
+# Forgive the UUOC.
 cat somefile.txt | dotnet bun.dll u -n MyFile.txt
 ```
-Similarly, for downloading you use the `>` operator. The following will download MyFile.txt and write it into newfile.txt
+Similarly, for downloading you can use the `>` operator. The following will download MyFile.txt and write it into newfile.txt
 ```
 dotnet bun.dll g -n MyFile.txt > newfile.txt
 ```
+
 
 ## Environment Variables
 
