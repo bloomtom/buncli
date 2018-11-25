@@ -4,6 +4,8 @@ using System.Collections.Generic;
 using System.Linq;
 using BunAPI;
 using System.IO;
+using System.Diagnostics;
+using System.Net;
 
 namespace BunCLI
 {
@@ -108,7 +110,7 @@ namespace BunCLI
         private static void Delete(BunClient client, DeleteOptions o)
         {
             var result = client.DeleteFile(o.Name).Result;
-            if (result != System.Net.HttpStatusCode.OK)
+            if (result != HttpStatusCode.OK)
             {
                 Console.Error.WriteLine($"Could not delete file: The API returned HTTP status {result}.");
                 Environment.Exit((int)ReturnCodes.OtherError);
@@ -121,41 +123,69 @@ namespace BunCLI
 
         private static void Upload(BunClient client, UploadOptions o)
         {
-            if (!Console.IsInputRedirected)
+            if (!Console.IsInputRedirected && o.FilePath == null)
             {
                 Console.Error.WriteLine("You must direct a stream to upload either by using pipes | or input redirection <.");
                 Environment.Exit((int)ReturnCodes.ArgumentError);
             }
             else
             {
-                var result = client.PutFile(Console.OpenStandardInput(), o.Name).Result;
-                if (result != System.Net.HttpStatusCode.Created)
+                string uploadName = o.Name ?? "stdin";
+                HttpStatusCode result;
+                if (o.FilePath != null)
                 {
-                    Console.Error.WriteLine($"Could not complete upload: The API returned HTTP status {result}.");
-                    Environment.Exit((int)ReturnCodes.OtherError);
+                    if (!File.Exists(o.FilePath)) { Console.Error.WriteLine("The specified file does not exist or isn't visible."); return; }
+                    uploadName = o.Name ?? Path.GetFileName(o.FilePath);
+                    using (var s = File.OpenRead(o.FilePath))
+                    {
+                        Console.Error.WriteLine($"Uploading {uploadName}");
+                        result = client.PutFile(s, uploadName, WriteProgress).Result;
+                    }
                 }
                 else
                 {
-                    Console.Error.WriteLine($"File {o.Name} uploaded successfully.");
+                    if (o.Name == null) { Console.Error.WriteLine("The -n option must be used when uploading from stdin."); return; }
+                    Console.Error.WriteLine("Uploading from stdin");
+                    result = client.PutFile(Console.OpenStandardInput(), o.Name, WriteProgress).Result;
+                }
+
+                if (result == HttpStatusCode.Created)
+                {
+                    Console.Error.WriteLine($"\nFile {uploadName} uploaded successfully.");
+                }
+                else
+                {
+                    Console.Error.WriteLine($"\nCould not complete upload: The API returned HTTP status {result}.");
+                    Environment.Exit((int)ReturnCodes.OtherError);
                 }
             }
         }
 
         private static void Download(BunClient client, DownloadOptions o)
         {
-            var result = client.GetFile(o.Name).Result;
-            if (result.StatusCode != System.Net.HttpStatusCode.OK)
+            Console.Error.WriteLine($"Downloading {o.Name}");
+
+            HttpStatusCode result;
+            if (o.DirectDownloadFlag)
             {
-                Console.Error.WriteLine($"Could not complete download: The API returned HTTP status {result.StatusCode}.");
+                using (var s = File.OpenWrite(o.Name))
+                {
+                    result = client.GetFile(o.Name, s, WriteProgress).Result;
+                }
+            }
+            else
+            {
+                result = client.GetFile(o.Name, Console.OpenStandardOutput(), WriteProgress).Result;
+            }
+
+            if (result != HttpStatusCode.OK)
+            {
+                Console.Error.WriteLine($"\nCould not complete download: The API returned HTTP status {result}.");
                 Environment.Exit((int)ReturnCodes.OtherError);
             }
             else
             {
-                // Write as binary to stream.
-                using (Stream binOut = Console.OpenStandardOutput())
-                {
-                    result.Stream.CopyTo(binOut);
-                }
+                Console.Error.WriteLine($"\nDownload complete.");
             }
         }
 
@@ -189,6 +219,40 @@ namespace BunCLI
         private static string FormatListPrintLine(int padding, params string[] args)
         {
             return string.Concat(args.Select(x => x.PadRight(padding)));
+        }
+
+        private static Stopwatch lastUpdated = new Stopwatch();
+        private static long lastTransfered = 0;
+        private const int refreshRate = 333;
+        private static void WriteProgress(HttpProgress.ICopyProgress progress)
+        {
+            if (!lastUpdated.IsRunning)
+            {
+                lastUpdated.Start();
+                return;
+            }
+            else
+            {
+                if (lastUpdated.ElapsedMilliseconds < refreshRate && progress.PercentComplete != 1) { return; }
+            }
+
+            int transferRate = (int)((progress.BytesTransfered - lastTransfered) / Math.Max(refreshRate, lastUpdated.ElapsedMilliseconds) * 1000);
+            lastTransfered = progress.BytesTransfered;
+            lastUpdated.Restart();
+
+            string progressBar = $"[{string.Concat(Enumerable.Repeat('#', (int)Math.Floor(progress.PercentComplete * 20))).PadRight(20)}]";
+            string transfered = FilesizeFormatter.FormatFilesize(progress.BytesTransfered);
+            string expected = FilesizeFormatter.FormatFilesize(progress.ExpectedBytes);
+            string rate = FilesizeFormatter.FormatFilesize(transferRate);
+            string transferRatio = $"{ transfered } / { expected}";
+            string progressLine = $"\r{progress.PercentComplete.ToString("P").PadLeft(8)} {progressBar} {transferRatio} @ {rate}/s".PadRight(80);
+            Console.Error.Write(progressLine);
+
+            if (progress.PercentComplete == 1)
+            {
+                lastTransfered = 0;
+                lastUpdated.Stop();
+            }
         }
     }
 }

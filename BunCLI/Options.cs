@@ -34,7 +34,7 @@ namespace BunCLI
         }
     }
 
-    [Verb("u", HelpText = "Upload a file. The file is read from the standard input.")]
+    [Verb("u", HelpText = "Upload a file from disk or stdin.")]
     public class UploadOptions : BaseOptions, IBunOptions
     {
         [Usage(ApplicationAlias = ">  dotnet bun.dll")]
@@ -42,12 +42,15 @@ namespace BunCLI
         {
             get
             {
-                yield return new Example("Upload a file from the standard input stream", new UploadOptions { Zone = "MyZone", Key = "01234567-89ab", Name = "somefile.txt" });
+                yield return new Example("Upload a file from disk", new UploadOptions { Zone = "MyZone", Key = "01234567-89ab", FilePath = "somefile.txt" });
             }
         }
 
-        [Option('n', "name", Default = null, HelpText = "The file name. Defaults to the filename on disk.")]
+        [Option('n', "name", Default = null, HelpText = "The file name to upload as. Defaults to the filename on disk.")]
         public string Name { get; set; }
+
+        [Option('p', "path", Default = null, HelpText = "The file path on disk.")]
+        public string FilePath { get; set; }
     }
 
     [Verb("g", HelpText = "Get/download a file. The downloaded file is written to the standard output.")]
@@ -64,6 +67,9 @@ namespace BunCLI
 
         [Option('n', "name", Required = true, Default = null, HelpText = "The name of the file to download.")]
         public string Name { get; set; }
+
+        [Option('d', "direct", Default = false, HelpText = "Download to disk in the current directory.")]
+        public bool DirectDownloadFlag { get; set; }
     }
 
     [Verb("r", HelpText = "Remove/delete a file.")]
