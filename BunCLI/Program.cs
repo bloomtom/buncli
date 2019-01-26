@@ -139,14 +139,14 @@ namespace BunCLI
                     using (var s = File.OpenRead(o.FilePath))
                     {
                         Console.Error.WriteLine($"Uploading {uploadName}");
-                        result = client.PutFile(s, uploadName, WriteProgress).Result;
+                        result = client.PutFile(s, uploadName, false, WriteProgress).Result;
                     }
                 }
                 else
                 {
                     if (o.Name == null) { Console.Error.WriteLine("The -n option must be used when uploading from stdin."); return; }
                     Console.Error.WriteLine("Uploading from stdin");
-                    result = client.PutFile(Console.OpenStandardInput(), o.Name, WriteProgress).Result;
+                    result = client.PutFile(Console.OpenStandardInput(), o.Name, false, WriteProgress).Result;
                 }
 
                 if (result == HttpStatusCode.Created)
