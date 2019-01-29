@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bloomtom/BunAPI/master/bunsharp.png" />
+</p>
+
 # bun CLI
 >A reference front-end for the [BunAPI](https://github.com/bloomtom/BunAPI) library.
 
