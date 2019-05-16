@@ -6,6 +6,9 @@ using BunAPI;
 using System.IO;
 using System.Diagnostics;
 using System.Net;
+using HttpProgress;
+using System.IO.Enumeration;
+using System.Threading;
 
 namespace BunCLI
 {
@@ -23,8 +26,15 @@ namespace BunCLI
         private const string zoneEnvName = "BUN_ZONE";
         private const string keyEnvName = "BUN_KEY";
 
+        private static readonly CancellationTokenSource shutdownCts = new CancellationTokenSource();
+
         static void Main(string[] args)
         {
+            AppDomain.CurrentDomain.ProcessExit += (sender, eventArgs) =>
+            {
+                shutdownCts.Cancel();
+            };
+
             // Read env vars.
             BaseOptions envOptions = new BaseOptions()
             {
@@ -35,7 +45,7 @@ namespace BunCLI
             try
             {
                 // Parse arguments and run program.
-                Parser.Default.ParseArguments<ListOptions, UploadOptions, DownloadOptions, DeleteOptions>(args)
+                Parser.Default.ParseArguments<ListOptions, UploadOptions, DownloadOptions, DeleteOptions, SyncOptions>(args)
                     .WithParsed<IBunOptions>(o =>
                     {
                         o.Key = o.Key ?? envOptions.Key;
@@ -100,6 +110,9 @@ namespace BunCLI
                 case DeleteOptions o:
                     Delete(client, o);
                     break;
+                case SyncOptions o:
+                    Sync(client, o);
+                    break;
                 default:
                     Console.Error.WriteLine("Unknown verb.");
                     Environment.Exit((int)ReturnCodes.ArgumentError);
@@ -121,32 +134,37 @@ namespace BunCLI
             }
         }
 
-        private static void Upload(BunClient client, UploadOptions o)
+        private static void Upload(BunClient client, ITransferOptions o)
         {
-            if (!Console.IsInputRedirected && o.FilePath == null)
+            if (!Console.IsInputRedirected && o.LocalFilePath == null)
             {
                 Console.Error.WriteLine("You must direct a stream to upload either by using pipes | or input redirection <.");
                 Environment.Exit((int)ReturnCodes.ArgumentError);
             }
             else
             {
-                string uploadName = o.Name ?? "stdin";
+                string uploadName = o.RemoteName ?? "stdin";
                 HttpStatusCode result;
-                if (o.FilePath != null)
+                if (o.LocalFilePath != null)
                 {
-                    if (!File.Exists(o.FilePath)) { Console.Error.WriteLine("The specified file does not exist or isn't visible."); return; }
-                    uploadName = o.Name ?? Path.GetFileName(o.FilePath);
-                    using (var s = File.OpenRead(o.FilePath))
+                    string localPath = o.LocalFilePath;
+                    if (Directory.Exists(o.LocalFilePath))
+                    {
+                        localPath = Path.Combine(o.LocalFilePath, o.RemoteName);
+                    }
+                    else if (!File.Exists(o.LocalFilePath)) { Console.Error.WriteLine("$The specified file {o.FilePath} does not exist or isn't visible."); return; }
+                    uploadName = o.RemoteName ?? Path.GetFileName(localPath);
+                    using (var s = File.OpenRead(localPath))
                     {
                         Console.Error.WriteLine($"Uploading {uploadName}");
-                        result = client.PutFile(s, uploadName, false, WriteProgress).Result;
+                        result = client.PutFile(s, uploadName, false, new Progress<ICopyProgress>((p) => { WriteProgress(p); })).Result;
                     }
                 }
                 else
                 {
-                    if (o.Name == null) { Console.Error.WriteLine("The -n option must be used when uploading from stdin."); return; }
+                    if (o.RemoteName == null) { Console.Error.WriteLine("The -n option must be used when uploading from stdin."); return; }
                     Console.Error.WriteLine("Uploading from stdin");
-                    result = client.PutFile(Console.OpenStandardInput(), o.Name, false, WriteProgress).Result;
+                    result = client.PutFile(Console.OpenStandardInput(), o.RemoteName, false, new Progress<ICopyProgress>((p) => { WriteProgress(p); })).Result;
                 }
 
                 if (result == HttpStatusCode.Created)
@@ -161,26 +179,49 @@ namespace BunCLI
             }
         }
 
-        private static void Download(BunClient client, DownloadOptions o)
+        private static void Download(BunClient client, ITransferOptions o)
         {
-            Console.Error.WriteLine($"Downloading {o.Name}");
+            Console.Error.WriteLine($"Downloading {o.RemoteName}");
 
             HttpStatusCode result;
-            if (o.DirectDownloadFlag)
+            string destination = null;
+            if (o is DownloadOptions options && options.StdOutFlag)
             {
-                using (var s = File.OpenWrite(o.Name))
-                {
-                    result = client.GetFile(o.Name, s, WriteProgress).Result;
-                }
+                result = client.GetFile(o.RemoteName, Console.OpenStandardOutput(), new Progress<ICopyProgress>((p) => { WriteProgress(p); }), shutdownCts.Token).Result;
             }
             else
             {
-                result = client.GetFile(o.Name, Console.OpenStandardOutput(), WriteProgress).Result;
+                if (o.LocalFilePath == null) { o.LocalFilePath = Environment.CurrentDirectory; }
+                if (Directory.Exists(o.LocalFilePath))
+                {
+                    destination = Path.Combine(o.LocalFilePath, o.RemoteName);
+                }
+                else
+                {
+                    destination = o.LocalFilePath;
+                }
+                using (var s = File.Create(destination))
+                {
+                    result = client.GetFile(o.RemoteName, s, new Progress<ICopyProgress>((p) => { WriteProgress(p); }), shutdownCts.Token).Result;
+                    if (shutdownCts.IsCancellationRequested)
+                    {
+                        Console.Error.WriteLine("Download cancelled.");
+                        s.Close();
+                        if (File.Exists(destination))
+                        {
+                            File.Delete(destination);
+                        }
+                    }
+                }
             }
 
             if (result != HttpStatusCode.OK)
             {
                 Console.Error.WriteLine($"\nCould not complete download: The API returned HTTP status {result}.");
+                if (destination != null && File.Exists(destination))
+                {
+                    File.Delete(destination);
+                }
                 Environment.Exit((int)ReturnCodes.OtherError);
             }
             else
@@ -189,10 +230,117 @@ namespace BunCLI
             }
         }
 
+        private static void Sync(BunClient client, SyncOptions o)
+        {
+            if (o.LocalPath == null) { o.LocalPath = Environment.CurrentDirectory; }
+            if (!Directory.Exists(o.LocalPath))
+            {
+                Console.Error.WriteLine($"Specified local path doesn't exist: {o.LocalPath}.");
+                Environment.Exit((int)ReturnCodes.ArgumentError);
+            }
+
+            Direction direction = Direction.None;
+            switch (o.Direction.ToLowerInvariant())
+            {
+                case "up":
+                    direction = Direction.Up;
+                    break;
+                case "down":
+                    direction = Direction.Down;
+                    break;
+                default:
+                    Console.Error.WriteLine($"Invalid direction: {o.Direction}. Only 'up' and 'down' are accepted.");
+                    Environment.Exit((int)ReturnCodes.ArgumentError);
+                    break;
+            }
+
+            // Get remote listing.
+            Console.Error.WriteLine("Fetching remote listing...");
+            var rawRemote = client.ListFiles().Result;
+            if (rawRemote.StatusCode != HttpStatusCode.OK)
+            {
+                Console.Error.WriteLine($"Could not fetch remote listing for sync: HTTP status {rawRemote.StatusCode}.");
+                Environment.Exit((int)ReturnCodes.OtherError);
+            }
+            var remoteFiles = rawRemote.Files.Where(x => !x.IsDirectory).Select(x => new SyncFile(Path.Combine(x.Path.Substring(x.StorageZoneName.Length + 2), x.ObjectName), x.LastChanged, x.Length));
+            if (shutdownCts.IsCancellationRequested) { return; }
+
+            // Get local listing.
+            var enumerationOptions = new EnumerationOptions() { RecurseSubdirectories = true, IgnoreInaccessible = true };
+            var localFiles = new FileSystemEnumerable<(string Path, DateTimeOffset lastModified, long length)>(o.LocalPath,
+                (ref FileSystemEntry entry) => (entry.ToFullPath().Substring(o.LocalPath.Length + 1), entry.LastWriteTimeUtc, entry.Length), enumerationOptions)
+            {
+                ShouldIncludePredicate = (ref FileSystemEntry entry) => { return !entry.IsDirectory; }
+            }.Select(x => new SyncFile(x.Path, x.lastModified, x.length));
+            if (shutdownCts.IsCancellationRequested) { return; }
+
+            switch (direction)
+            {
+                case Direction.Up:
+                    var toUpload = CompareSets(localFiles, remoteFiles);
+                    PerformSync(Upload, client, o, toUpload);
+                    break;
+                case Direction.Down:
+                    var toDownload = CompareSets(remoteFiles, localFiles);
+                    PerformSync(Download, client, o, toDownload);
+                    break;
+                default:
+                    throw new Exception("Direction unspecified.");
+            }
+        }
+
+        private static void PerformSync(Action<BunClient, ITransferOptions> method, BunClient client, SyncOptions o, List<SyncFile> files)
+        {
+            int i = 1;
+            if (files.Count == 0)
+            {
+                Console.Error.WriteLine($"Nothing to sync.");
+                return;
+            }
+            foreach (var file in files)
+            {
+                Console.Error.WriteLine($"{i}/{files.Count}");
+                try
+                {
+                    method.Invoke(client, new DownloadOptions()
+                    {
+                        Zone = o.Zone,
+                        Key = o.Key,
+                        LocalFilePath = o.LocalPath,
+                        RemoteName = file.Path
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"Failed to transfer {file.Path}: {ex.Message}");
+                }
+                i++;
+                if (shutdownCts.IsCancellationRequested) { return; }
+            }
+        }
+
+        private static List<SyncFile> CompareSets(IEnumerable<SyncFile> sourceSet, IEnumerable<SyncFile> baseSet)
+        {
+            var toDownload = new List<SyncFile>();
+            var baseHashSet = baseSet.ToHashSet();
+            foreach (var sourceFile in sourceSet)
+            {
+                if (baseHashSet.TryGetValue(sourceFile, out SyncFile localFile))
+                {
+                    if (localFile.Length == sourceFile.Length && localFile.LastModified >= sourceFile.LastModified)
+                    {
+                        continue;
+                    }
+                }
+                toDownload.Add(sourceFile);
+            }
+            return toDownload;
+        }
+
         private static void List(BunClient client)
         {
             var result = client.ListFiles().Result;
-            if (result.StatusCode != System.Net.HttpStatusCode.OK)
+            if (result.StatusCode != HttpStatusCode.OK)
             {
                 Console.Error.WriteLine($"Could not complete listing: The API returned HTTP status {result.StatusCode}.");
                 Environment.Exit((int)ReturnCodes.OtherError);
@@ -224,7 +372,7 @@ namespace BunCLI
         private static Stopwatch lastUpdated = new Stopwatch();
         private static long lastTransfered = 0;
         private const int refreshRate = 333;
-        private static void WriteProgress(HttpProgress.ICopyProgress progress)
+        private static void WriteProgress(ICopyProgress progress)
         {
             if (!lastUpdated.IsRunning)
             {
@@ -236,12 +384,12 @@ namespace BunCLI
                 if (lastUpdated.ElapsedMilliseconds < refreshRate && progress.PercentComplete != 1) { return; }
             }
 
-            int transferRate = (int)((progress.BytesTransfered - lastTransfered) / Math.Max(refreshRate, lastUpdated.ElapsedMilliseconds) * 1000);
-            lastTransfered = progress.BytesTransfered;
+            int transferRate = (int)((progress.BytesTransferred - lastTransfered) / Math.Max(refreshRate, lastUpdated.ElapsedMilliseconds) * 1000);
+            lastTransfered = progress.BytesTransferred;
             lastUpdated.Restart();
 
             string progressBar = $"[{string.Concat(Enumerable.Repeat('#', (int)Math.Floor(progress.PercentComplete * 20))).PadRight(20)}]";
-            string transfered = FilesizeFormatter.FormatFilesize(progress.BytesTransfered);
+            string transfered = FilesizeFormatter.FormatFilesize(progress.BytesTransferred);
             string expected = FilesizeFormatter.FormatFilesize(progress.ExpectedBytes);
             string rate = FilesizeFormatter.FormatFilesize(transferRate);
             string transferRatio = $"{ transfered } / { expected}";
